@@ -2,14 +2,20 @@
 Generic ComfyUI workflow deployer for Modal.
 
 Usage:
-    # First time: download models to volume (one-time, ~10-30min)
+    # 0. Create API token secret (one-time)
+    modal secret create hypnago-api-token API_TOKEN=<your-secret-token>
+
+    # 1. First time: download models to volume (one-time, ~10-30min)
     WORKFLOW=wan22_character_replace modal run deploy.py::setup
 
-    # Deploy (fast, ~10s since models are on volume)
+    # 2. Deploy (fast, ~10s since models are on volume)
     WORKFLOW=wan22_character_replace modal deploy deploy.py
 
-    # Dev mode (hot reload on code changes)
+    # 3. Dev mode (hot reload on code changes)
     WORKFLOW=wan22_character_replace modal serve deploy.py
+
+All endpoints except /health require Bearer token auth:
+    curl -H "Authorization: Bearer <your-token>" https://...modal.run/run
 """
 
 import os
@@ -120,6 +126,7 @@ def setup():
     timeout=_TIMEOUT,
     container_idle_timeout=300,
     volumes={"/vol/models": models_vol},
+    secrets=[modal.Secret.from_name("hypnago-api-token", required_keys=["API_TOKEN"])],
 )
 @modal.asgi_app()
 def api():
@@ -129,12 +136,25 @@ def api():
     import time
     import uuid
 
+    import hmac
+
     import httpx
-    from fastapi import FastAPI, Request
+    from fastapi import Depends, FastAPI, HTTPException, Request
     from fastapi.responses import JSONResponse, Response, StreamingResponse
+    from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
     COMFY = "http://127.0.0.1:8000"
+    API_TOKEN = os.environ.get("API_TOKEN")
     web = FastAPI()
+    security = HTTPBearer()
+
+    async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+        if API_TOKEN and not hmac.compare_digest(credentials.credentials, API_TOKEN):
+            raise HTTPException(status_code=401, detail="Invalid token")
+        if not API_TOKEN:
+            # No token configured — allow access but warn in logs
+            print("WARNING: No API_TOKEN secret configured. Endpoints are unprotected.")
+        return credentials
 
     # --- Start ComfyUI in the background ---
     # Symlink models from volume
@@ -257,7 +277,7 @@ def api():
         except Exception as e:
             return JSONResponse({"status": "starting", "error": str(e)}, status_code=503)
 
-    @web.post("/run")
+    @web.post("/run", dependencies=[Depends(verify_token)])
     async def run(request: Request):
         """
         Simple API: pass params, get back output.
@@ -344,7 +364,7 @@ def api():
                 status_code=500,
             )
 
-    @web.get("/output/{path:path}")
+    @web.get("/output/{path:path}", dependencies=[Depends(verify_token)])
     async def get_output(path: str):
         """Serve output files from ComfyUI."""
         async with httpx.AsyncClient() as client:
@@ -361,7 +381,7 @@ def api():
             return Response(content=r.content, media_type=ct)
 
     # --- Proxy everything else to ComfyUI (so the UI still works) ---
-    @web.api_route("/comfy/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    @web.api_route("/comfy/{path:path}", methods=["GET", "POST", "PUT", "DELETE"], dependencies=[Depends(verify_token)])
     async def comfy_proxy(request: Request, path: str):
         """Proxy to ComfyUI for direct access."""
         async with httpx.AsyncClient() as client:

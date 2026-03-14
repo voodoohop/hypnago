@@ -2,6 +2,9 @@
 Client for ComfyUI workflows deployed on Modal.
 
 Usage:
+    # Set your API token (from Modal secret "hypnago-api-token")
+    export HYPNAGO_API_TOKEN="your-token-here"
+
     python client.py --workflow wan22_character_replace \
         --video input.mp4 \
         --image character.jpg
@@ -22,6 +25,8 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+
+API_TOKEN = os.environ.get("HYPNAGO_API_TOKEN", "")
 
 # Base URLs for each workflow
 ENDPOINTS = {
@@ -73,10 +78,13 @@ def upload_file(base_url, filepath, subfolder="", file_type="input"):
 
     data += f"--{boundary}--\r\n".encode()
 
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    if API_TOKEN:
+        headers["Authorization"] = f"Bearer {API_TOKEN}"
     req = urllib.request.Request(
         url,
         data=bytes(data),
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        headers=headers,
         method="POST",
     )
     resp = urllib.request.urlopen(req, timeout=120)
@@ -91,10 +99,13 @@ def queue_prompt(base_url, prompt, client_id=None):
         client_id = str(uuid.uuid4())
 
     payload = json.dumps({"prompt": prompt, "client_id": client_id}).encode()
+    headers = {"Content-Type": "application/json"}
+    if API_TOKEN:
+        headers["Authorization"] = f"Bearer {API_TOKEN}"
     req = urllib.request.Request(
         f"{base_url}/api/prompt",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     resp = urllib.request.urlopen(req, timeout=120)
@@ -107,7 +118,10 @@ def poll_status(base_url, prompt_id, timeout=600):
     start = time.time()
     while time.time() - start < timeout:
         try:
-            resp = urllib.request.urlopen(f"{base_url}/api/history/{prompt_id}", timeout=30)
+            req = urllib.request.Request(f"{base_url}/api/history/{prompt_id}")
+            if API_TOKEN:
+                req.add_header("Authorization", f"Bearer {API_TOKEN}")
+            resp = urllib.request.urlopen(req, timeout=30)
             history = json.loads(resp.read())
             if prompt_id in history:
                 return history[prompt_id]
@@ -136,7 +150,12 @@ def download_output(base_url, output_info, output_dir="."):
                 url = f"{base_url}/api/view?{params}"
                 out_path = os.path.join(output_dir, filename)
                 print(f"  Downloading {filename}...")
-                urllib.request.urlretrieve(url, out_path)
+                dl_req = urllib.request.Request(url)
+                if API_TOKEN:
+                    dl_req.add_header("Authorization", f"Bearer {API_TOKEN}")
+                with urllib.request.urlopen(dl_req, timeout=120) as resp:
+                    with open(out_path, "wb") as f:
+                        f.write(resp.read())
                 downloaded.append(out_path)
                 print(f"  Saved to {out_path}")
     return downloaded
